@@ -70,6 +70,13 @@ public class FlowGuard {
      * Core public API to evaluate feature flags locally.
      */
     public boolean isEnabled(String flagKey, String userId) {
+        return isEnabled(flagKey, userId, Map.of());
+    }
+
+    /**
+     * Core public API that accepts attributes for segment evaluation.
+     */
+    public boolean isEnabled(String flagKey, String userId, Map<String, String> attributes) {
         if (flagKey == null || flagKey.trim().isEmpty()) {
             logger.debug("Flag key is null or empty, falling back.");
             return fallbackStrategy.evaluate();
@@ -81,19 +88,11 @@ public class FlowGuard {
             return fallbackStrategy.evaluate();
         }
 
-        EvaluationResult result = evaluator.evaluate(flag, userId);
-        logger.debug("Evaluated flag '{}' for user '{}'. Result: {}, Reason: {}", 
+        EvaluationResult result = evaluator.evaluate(flag, userId, attributes);
+        logger.debug("Evaluated flag '{}' for user '{}' with attributes. Result: {}, Reason: {}", 
                 flagKey, userId, result.enabled(), result.reason());
         
         return result.enabled();
-    }
-
-    /**
-     * Core public API that accepts attributes for segment evaluation (YAGNI in Sprint 01).
-     */
-    public boolean isEnabled(String flagKey, String userId, Map<String, String> attributes) {
-        // Segmentation YAGNI: Delegate directly to key+userId evaluation
-        return isEnabled(flagKey, userId);
     }
 
     /**
