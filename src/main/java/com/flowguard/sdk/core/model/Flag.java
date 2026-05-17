@@ -37,4 +37,19 @@ public record Flag(
         this.rolloutPercentage = rolloutPercentage;
         this.rules = rules != null ? List.copyOf(rules) : List.of();
     }
+
+    /**
+     * Backward compatibility constructor for 7-argument calls.
+     */
+    public Flag(
+        UUID id,
+        UUID tenantId,
+        String key,
+        String name,
+        String description,
+        boolean enabled,
+        int rolloutPercentage
+    ) {
+        this(id, tenantId, key, name, description, enabled, rolloutPercentage, List.of());
+    }
 }

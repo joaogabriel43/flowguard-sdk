@@ -60,7 +60,8 @@ public class FlagCache {
                 flag.name(),
                 flag.description(),
                 !flag.enabled(),
-                flag.rolloutPercentage()
+                flag.rolloutPercentage(),
+                flag.rules()
         ));
     }
 
