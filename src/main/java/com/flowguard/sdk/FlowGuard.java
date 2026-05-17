@@ -20,25 +20,42 @@ public class FlowGuard {
     private final LocalEvaluator evaluator;
     private final FallbackStrategy fallbackStrategy;
     private final FlowGuardClient client;
+    private final FlagSseListener sseListener;
 
     public FlowGuard(FlowGuardClientConfig config) {
         this.cache = new FlagCache();
         this.evaluator = new LocalEvaluator();
         this.fallbackStrategy = new FallbackStrategy(config.isDefaultFallback());
         this.client = new FlowGuardClient(config, this.cache);
-        
-        // Initial flag fetch at startup
-        refreshCache();
+        this.sseListener = new FlagSseListener(config, this.cache, this.client);
     }
 
     /**
      * Helper constructor for testing with mock components.
      */
-    protected FlowGuard(FlagCache cache, LocalEvaluator evaluator, FallbackStrategy fallbackStrategy, FlowGuardClient client) {
+    public FlowGuard(FlagCache cache, LocalEvaluator evaluator, FallbackStrategy fallbackStrategy, FlowGuardClient client, FlagSseListener sseListener) {
         this.cache = cache;
         this.evaluator = evaluator;
         this.fallbackStrategy = fallbackStrategy;
         this.client = client;
+        this.sseListener = sseListener;
+    }
+
+    /**
+     * Initializes SDK connection: executes initial cache hydration and spawns the SSE listener.
+     */
+    public synchronized void connect() {
+        logger.info("Connecting FlowGuard SDK facade...");
+        refreshCache();
+        sseListener.start();
+    }
+
+    /**
+     * Closes the SSE connection and releases background thread pools gracefully.
+     */
+    public synchronized void disconnect() {
+        logger.info("Disconnecting FlowGuard SDK facade...");
+        sseListener.stop();
     }
 
     /**
