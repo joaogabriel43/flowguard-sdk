@@ -76,11 +76,16 @@ class FlowGuardClientIntegrationTest {
 
         // When
         FlowGuard flowGuard = new FlowGuard(config);
+        flowGuard.connect();
 
         // Then
-        assertTrue(flowGuard.isEnabled("flag-prod-1", "user-123"));
-        assertFalse(flowGuard.isEnabled("flag-prod-2", "user-123")); // global disabled
-        assertFalse(flowGuard.isEnabled("unknown-flag", "user-123")); // fallback false
+        try {
+            assertTrue(flowGuard.isEnabled("flag-prod-1", "user-123"));
+            assertFalse(flowGuard.isEnabled("flag-prod-2", "user-123")); // global disabled
+            assertFalse(flowGuard.isEnabled("unknown-flag", "user-123")); // fallback false
+        } finally {
+            flowGuard.disconnect();
+        }
     }
 
     @Test
@@ -103,9 +108,14 @@ class FlowGuardClientIntegrationTest {
 
         // When: Instantiation should succeed, log WARNING and use fallback strategy
         FlowGuard flowGuard = new FlowGuard(config);
+        flowGuard.connect();
 
         // Then
-        assertTrue(flowGuard.isEnabled("any-flag", "user-123")); // falls back to true safely!
+        try {
+            assertTrue(flowGuard.isEnabled("any-flag", "user-123")); // falls back to true safely!
+        } finally {
+            flowGuard.disconnect();
+        }
     }
 
     @Test
@@ -130,8 +140,13 @@ class FlowGuardClientIntegrationTest {
 
         // When: Instantiation should succeed under 1s timeout, log WARNING and use fallback strategy
         FlowGuard flowGuard = new FlowGuard(config);
+        flowGuard.connect();
 
         // Then
-        assertFalse(flowGuard.isEnabled("any-flag", "user-123")); // falls back to false safely!
+        try {
+            assertFalse(flowGuard.isEnabled("any-flag", "user-123")); // falls back to false safely!
+        } finally {
+            flowGuard.disconnect();
+        }
     }
 }

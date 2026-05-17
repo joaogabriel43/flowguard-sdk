@@ -4,6 +4,7 @@ import com.flowguard.sdk.cache.FallbackStrategy;
 import com.flowguard.sdk.cache.FlagCache;
 import com.flowguard.sdk.client.FlowGuardClient;
 import com.flowguard.sdk.client.FlowGuardClientConfig;
+import com.flowguard.sdk.client.FlagSseListener;
 import com.flowguard.sdk.core.evaluator.LocalEvaluator;
 import com.flowguard.sdk.core.model.EvaluationResult;
 import com.flowguard.sdk.core.model.Flag;
@@ -39,6 +40,13 @@ public class FlowGuard {
         this.fallbackStrategy = fallbackStrategy;
         this.client = client;
         this.sseListener = sseListener;
+    }
+
+    /**
+     * Legacy constructor overload for backward compatibility with Sprint 01 tests.
+     */
+    public FlowGuard(FlagCache cache, LocalEvaluator evaluator, FallbackStrategy fallbackStrategy, FlowGuardClient client) {
+        this(cache, evaluator, fallbackStrategy, client, null);
     }
 
     /**
