@@ -24,7 +24,7 @@ public class FlowGuardAutoConfiguration {
     @Value("${flowguard.default-fallback:false}")
     private boolean defaultFallback;
 
-    @Bean
+    @Bean(destroyMethod = "disconnect")
     @ConditionalOnMissingBean
     public FlowGuard flowGuard() {
         FlowGuardClientConfig config = FlowGuardClientConfig.builder()
@@ -33,6 +33,8 @@ public class FlowGuardAutoConfiguration {
                 .tenantId(tenantId)
                 .defaultFallback(defaultFallback)
                 .build();
-        return new FlowGuard(config);
+        FlowGuard flowGuard = new FlowGuard(config);
+        flowGuard.connect();
+        return flowGuard;
     }
 }
