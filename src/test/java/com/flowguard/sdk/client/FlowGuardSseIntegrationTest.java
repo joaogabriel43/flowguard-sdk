@@ -9,6 +9,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -172,7 +173,7 @@ class FlowGuardSseIntegrationTest {
                 .inScenario("ReconnectionScenario")
                 .whenScenarioStateIs(Scenario.STARTED)
                 .willReturn(aResponse().withStatus(503).withBody("Service Unavailable"))
-                .willTransitionTo("RETRYING"));
+                .willSetStateTo("RETRYING"));
 
         stubFor(get(urlEqualTo("/api/sse/flags"))
                 .inScenario("ReconnectionScenario")
@@ -198,6 +199,97 @@ class FlowGuardSseIntegrationTest {
             await().atMost(7, TimeUnit.SECONDS).untilAsserted(() -> {
                 assertTrue(flowGuard.isEnabled("flag-1", "user-1"));
             });
+        } finally {
+            flowGuard.disconnect();
+        }
+    }
+
+    @Test
+    void shouldReceiveAndEvaluateSegmentRulesViaSseSnapshotAndEvents() {
+        String apiKey = "my-key";
+        String tenantId = "my-tenant";
+
+        UUID flagId = UUID.randomUUID();
+        UUID tenantUid = UUID.randomUUID();
+
+        // 1. Initial snapshot with one flag that has EQUALS segment rule
+        String snapshotJson = "[" +
+                "  {" +
+                "    \"id\": \"" + flagId + "\"," +
+                "    \"tenantId\": \"" + tenantUid + "\"," +
+                "    \"key\": \"flag-rules\"," +
+                "    \"name\": \"Flag with Rules\"," +
+                "    \"description\": \"Desc\"," +
+                "    \"enabled\": true," +
+                "    \"rolloutPercentage\": 100," +
+                "    \"rules\": [" +
+                "      {" +
+                "        \"attributeKey\": \"plan\"," +
+                "        \"operator\": \"EQUALS\"," +
+                "        \"attributeValue\": \"premium\"" +
+                "      }" +
+                "    ]" +
+                "  }" +
+                "]";
+
+        // 2. Direct full-payload update SSE event changing the rule to IN operator: premium, partner
+        String updatedFlagJson = "{" +
+                "  \"id\": \"" + flagId + "\"," +
+                "  \"tenantId\": \"" + tenantUid + "\"," +
+                "  \"key\": \"flag-rules\"," +
+                "  \"name\": \"Flag with Rules Updated\"," +
+                "  \"description\": \"Desc\"," +
+                "  \"enabled\": true," +
+                "  \"rolloutPercentage\": 100," +
+                "  \"rules\": [" +
+                "    {" +
+                "      \"attributeKey\": \"plan\"," +
+                "      \"operator\": \"IN\"," +
+                "      \"attributeValue\": \"premium, partner\"" +
+                "    }" +
+                "  ]" +
+                "}";
+
+        String sseEvents = "event: flag-snapshot\n" +
+                "data: " + snapshotJson + "\n\n" +
+                "event: flag-updated\n" +
+                "data: " + updatedFlagJson + "\n\n";
+
+        // REST fallback stubs
+        stubFor(get(urlEqualTo("/api/flags"))
+                .willReturn(aResponse()
+                        .withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("[]")));
+
+        // SSE Endpoint Stub
+        stubFor(get(urlEqualTo("/api/sse/flags"))
+                .willReturn(aResponse()
+                        .withStatus(200)
+                        .withHeader("Content-Type", "text/event-stream")
+                        .withBody(sseEvents)));
+
+        FlowGuardClientConfig config = FlowGuardClientConfig.builder()
+                .serverUrl(serverUrl)
+                .apiKey(apiKey)
+                .tenantId(tenantId)
+                .build();
+
+        FlowGuard flowGuard = new FlowGuard(config);
+        flowGuard.connect();
+
+        try {
+            // Verify that both initial snapshot and live sse update are received and processed.
+            // Under the final updated state (operator IN: premium, partner):
+            // plan = premium -> true
+            // plan = partner -> true
+            // plan = free -> false
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
+                assertTrue(flowGuard.isEnabled("flag-rules", "user-1", Map.of("plan", "premium")));
+                assertTrue(flowGuard.isEnabled("flag-rules", "user-1", Map.of("plan", "partner")));
+                assertFalse(flowGuard.isEnabled("flag-rules", "user-1", Map.of("plan", "free")));
+            });
+
         } finally {
             flowGuard.disconnect();
         }
