@@ -16,20 +16,52 @@ public class FlagCache {
         return store.get(key);
     }
 
-    public void put(String key, Flag flag) {
+    public synchronized void put(String key, Flag flag) {
         if (key != null && flag != null) {
             store.put(key, flag);
         }
     }
 
-    public void putAll(Map<String, Flag> flags) {
+    public synchronized void putAll(Map<String, Flag> flags) {
         if (flags != null) {
             store.putAll(flags);
         }
     }
 
-    public void clear() {
+    public synchronized void clear() {
         store.clear();
+    }
+
+    public synchronized void replace(Map<String, Flag> newFlags) {
+        store.clear();
+        if (newFlags != null) {
+            store.putAll(newFlags);
+        }
+    }
+
+    public synchronized void remove(String key) {
+        if (key != null) {
+            store.remove(key);
+        }
+    }
+
+    /**
+     * Atomically toggles the enabled field of a flag in the cache.
+     * Uses ConcurrentHashMap's native atomic computeIfPresent for maximum performance.
+     */
+    public void toggle(String key) {
+        if (key == null) {
+            return;
+        }
+        store.computeIfPresent(key, (k, flag) -> new Flag(
+                flag.id(),
+                flag.tenantId(),
+                flag.key(),
+                flag.name(),
+                flag.description(),
+                !flag.enabled(),
+                flag.rolloutPercentage()
+        ));
     }
 
     public int size() {
