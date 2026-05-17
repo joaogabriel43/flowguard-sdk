@@ -87,4 +87,51 @@ public class FlowGuardClient {
             logger.warn("Unexpected error occurred while loading feature flags. Operating in fallback mode: {}", e.getMessage(), e);
         }
     }
+
+    /**
+     * Synchronously fetches details of a single feature flag from the server.
+     * Used by the SSE Listener to hydtrate the cache on enxutos/change updates.
+     */
+    public Flag fetchSingleFlag(String flagKey) {
+        if (flagKey == null || flagKey.trim().isEmpty()) {
+            return null;
+        }
+
+        String url = config.getServerUrl();
+        if (url.endsWith("/")) {
+            url += "api/flags/" + flagKey;
+        } else {
+            url += "/api/flags/" + flagKey;
+        }
+
+        Request request = new Request.Builder()
+                .url(url)
+                .get()
+                .header("Authorization", "Bearer " + config.getApiKey())
+                .header("X-Tenant-ID", config.getTenantId())
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                logger.warn("Failed to fetch details for single flag '{}'. HTTP Status: {}.", flagKey, response.code());
+                return null;
+            }
+
+            ResponseBody body = response.body();
+            if (body == null) {
+                logger.warn("Received empty response body for single flag '{}'.", flagKey);
+                return null;
+            }
+
+            String json = body.string();
+            return objectMapper.readValue(json, Flag.class);
+
+        } catch (IOException e) {
+            logger.warn("Unable to connect to FlowGuard server at {} to fetch single flag: {}", url, e.getMessage());
+        } catch (Exception e) {
+            logger.warn("Unexpected error occurred while fetching single flag: {}", e.getMessage(), e);
+        }
+
+        return null;
+    }
 }
