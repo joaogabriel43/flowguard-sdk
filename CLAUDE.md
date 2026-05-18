@@ -1,8 +1,8 @@
 # FlowGuard SDK — CLAUDE.md
 
 **Nome:** FlowGuard SDK
-**Versão:** 1.0.0
-**Data:** 2025-05-17
+**Versão:** 1.1.0
+**Data:** 2026-05-18
 
 ---
 
@@ -88,26 +88,77 @@ O SDK oferece auto-configuração opcional para projetos Spring Boot, permitindo
 
 ## Erros Conhecidos e Como Evitá-los
 
-> _Seção a ser preenchida progressivamente conforme o projeto avança._
+### [2026-05-18] Erro: Janela de cache vazio em clear()+putAll() no loadFlags()
+**O que aconteceu:** `cache.clear()` e `cache.putAll()` eram chamadas `synchronized` separadas. Entre elas, `cache.get()` (não sincronizado) via uma thread concorrente retornava `null` para todas as flags, ativando o fallback falsamente.
+**Por que:** Duas chamadas ao monitor de `FlagCache` com uma lacuna entre elas; `get()` usa apenas o lock interno do `ConcurrentHashMap`, não o monitor do objeto.
+**Como prevenir:** Sempre usar `cache.replace(flagMap)` para substituição atômica — nunca `clear()` seguido de `putAll()` em chamadas separadas.
+
+### [2026-05-18] Erro: toggle() e replace() usavam locks incompatíveis no FlagCache
+**O que aconteceu:** `replace()` era `synchronized` em `FlagCache.this`, mas `toggle()` usava apenas `ConcurrentHashMap.computeIfPresent()`. Um evento de toggle durante um snapshot causava descarte silencioso do toggle.
+**Por que:** Dois níveis de locking incompatíveis (monitor do objeto vs. lock interno do CHM). Se `replace()` executar `clear()` antes do `toggle()`, a chave some e `computeIfPresent` não faz nada.
+**Como prevenir:** Todos os métodos de escrita no `FlagCache` devem ser `synchronized` no mesmo monitor. Não misturar `synchronized(this)` com operações atômicas isoladas do CHM em métodos de escrita.
+
+### [2026-05-18] Erro: Campo `attempt` não-volatile em multi-thread no FlagSseListener
+**O que aconteceu:** `int attempt` era lido em `connectLoop` (executor thread) e escrito em `onOpen` (OkHttp callback thread) sem garantia de visibilidade entre threads.
+**Por que:** Sem `volatile`, o Java Memory Model não garante que a escrita de uma thread seja visível para outra. `attempt++` no connectLoop também não é atômico.
+**Como prevenir:** Usar `AtomicInteger` para campos numéricos compartilhados entre threads distintas. `volatile int` é suficiente apenas se uma única thread escreve; com duas threads escrevendo, `AtomicInteger` é obrigatório.
+
+### [2026-05-18] Erro: processUpdated() bloqueava a thread de callback do OkHttp SSE
+**O que aconteceu:** Chamadas HTTP síncronas (`client.fetchSingleFlag()`, `client.loadFlags()`) dentro de `processUpdated()` bloqueavam a thread de callback do OkHttp. Durante o bloqueio, nenhum outro evento SSE era processado.
+**Por que:** Callbacks SSE do OkHttp rodam em uma thread do dispatcher. Qualquer IO síncrono nessa thread atrasa ou descarta eventos subsequentes.
+**Como prevenir:** Qualquer operação de IO dentro de callbacks SSE deve ser delegada a um executor dedicado. No SDK: `cacheUpdateExecutor` (thread `flowguard-cache-updater`) recebe as tarefas de hidratação HTTP; a callback retorna imediatamente.
+
+### [2026-05-18] Erro: Dependência circular writer/latch no teste de concorrência
+**O que aconteceu:** `finishLatch` era `readerCount + 1` (incluía o writer). O writer só fazia countdown após `running = false`, mas `running = false` só era setado após `await()` do latch. O teste sempre sofria timeout de 5 segundos silenciosamente.
+**Por que:** Dependência circular: `await` esperava o writer → writer esperava `running=false` → `running=false` só vinha após `await`. O `boolean finished` era ignorado, escondendo o timeout.
+**Como prevenir:** Em testes com thread writer de duração indefinida, nunca incluir o writer no `CountDownLatch`. O latch deve cobrir apenas workers com término previsível. O writer é parado de forma independente por um `AtomicBoolean`. O retorno de `await()` deve ser sempre assertado com `assertTrue(finished)`.
 
 ---
 
 ## Otimizações e Performance
 
-> _Seção a ser preenchida progressivamente conforme o projeto avança._
+### [2026-05-18] Substituição atômica do cache via replace() em vez de clear()+putAll()
+**Contexto:** Toda carga de flags (`loadFlags()`, `processSnapshot()`) precisava substituir o mapa inteiro. A abordagem anterior usava `clear()` + `putAll()` separados.
+**Solução:** `FlagCache.replace(Map)` executa ambas as operações em um único bloco `synchronized`, eliminando a janela de inconsistência. Chamadas de `get()` nunca veem o cache vazio entre as duas etapas.
+**Resultado:** Zero falsos fallbacks durante recargas de cache — impacto direto em aplicações com alto throughput de chamadas a `isEnabled()`.
+
+### [2026-05-18] Executor dedicado para hidratações HTTP em eventos SSE
+**Contexto:** Eventos `flag-updated` slim disparavam `client.fetchSingleFlag()` síncronos dentro da callback do OkHttp.
+**Solução:** Thread `flowguard-cache-updater` (executor single-thread) recebe a tarefa; a callback SSE retorna imediatamente.
+**Resultado:** Eventos SSE em rajada não se acumulam mais durante hidratações de flag individual.
+
+---
+
+## Padrões de Thread Safety do Projeto
+
+- **Regra do monitor único:** todos os métodos de escrita em `FlagCache` devem usar `synchronized` no mesmo monitor (`this`). Nunca misturar `synchronized(this)` com operações atômicas isoladas do `ConcurrentHashMap` para métodos de escrita.
+- **AtomicInteger para contadores compartilhados entre threads:** campos numéricos escritos de mais de uma thread usam `AtomicInteger`, não `int` ou `volatile int`.
+- **IO em callbacks SSE sempre delegado:** qualquer chamada de rede dentro de um `EventSourceListener` deve ser submetida a um executor separado, nunca executada na callback diretamente.
+- **CountDownLatch em testes cobre apenas workers com término previsível:** writers de duração indefinida são parados por `AtomicBoolean` independente do latch; `assertTrue(latch.await(...))` é obrigatório.
+
+---
+
+## Contrato da API Pública
+
+- `isEnabled(flagKey, userId)` e `isEnabled(flagKey, userId, attributes)` **nunca lançam exceção** para o consumidor — erros retornam `fallbackStrategy.evaluate()`.
+- `flagKey == null` ou vazio → fallback + `logger.warn`.
+- `userId == null` → fallback + `logger.warn` (introduzido em v1.1.0; antes causava hash silencioso de `"flagkeynull"`).
+- Consumidores que passam `userId` de contextos que podem ser nulos (ex: usuário não autenticado) devem tratar isso antes de chamar `isEnabled()`, ou configurar `defaultFallback = true` para esses casos.
 
 ---
 
 ## Agentes: Casos de Uso Confirmados
 
-> _Seção a ser preenchida progressivamente conforme o projeto avança._
+| Agente | Tarefa | Resultado |
+|--------|--------|-----------|
+| `engineering-code-reviewer` | Revisão crítica pré-portfólio (thread safety, resiliência, API, CI, testes, publicação) | Gerou relatório com 15 issues categorizados por severidade |
+| `engineering-senior-developer` | Implementação de 12 correções em 4 commits semânticos | Todos os itens do relatório implementados sem regressão |
 
 ---
 
 ## Changelog do CLAUDE.md
 
-> _Seção a ser preenchida progressivamente conforme o projeto avança._
-
-| Versão | Data       | Descrição                                      | Autor     |
-|--------|------------|------------------------------------------------|-----------|
-| 1.0.0  | 2025-05-17 | Criação inicial com visão, ADRs e padrões do SDK | @engineering-backend-architect |
+| Versão | Data       | Descrição                                                                                                   | Autor     |
+|--------|------------|-------------------------------------------------------------------------------------------------------------|-----------|
+| 1.0.0  | 2025-05-17 | Criação inicial com visão, ADRs e padrões do SDK                                                            | @engineering-backend-architect |
+| 1.1.0  | 2026-05-18 | Revisão crítica pré-portfólio: 5 erros conhecidos, 2 otimizações, padrões de thread safety, contrato de API pública, casos de uso de agentes confirmados | @engineering-code-reviewer + @engineering-senior-developer |
