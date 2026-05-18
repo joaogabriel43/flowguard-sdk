@@ -77,8 +77,7 @@ public class FlowGuardClient {
                 }
             }
 
-            cache.clear();
-            cache.putAll(flagMap);
+            cache.replace(flagMap);
             logger.info("Successfully loaded {} feature flags into cache from FlowGuard server.", flagMap.size());
 
         } catch (IOException e) {

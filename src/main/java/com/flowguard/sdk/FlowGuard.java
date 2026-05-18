@@ -55,6 +55,10 @@ public class FlowGuard {
     public synchronized void connect() {
         logger.info("Connecting FlowGuard SDK facade...");
         refreshCache();
+        if (sseListener == null) {
+            logger.warn("SSE Listener not configured; real-time updates are disabled.");
+            return;
+        }
         sseListener.start();
     }
 
@@ -63,6 +67,10 @@ public class FlowGuard {
      */
     public synchronized void disconnect() {
         logger.info("Disconnecting FlowGuard SDK facade...");
+        if (sseListener == null) {
+            logger.warn("SSE Listener not configured; nothing to disconnect.");
+            return;
+        }
         sseListener.stop();
     }
 

@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class FlagSseListener extends EventSourceListener {
 
@@ -29,14 +30,19 @@ public class FlagSseListener extends EventSourceListener {
     private final FlagCache cache;
     private final FlowGuardClient client;
     private final ObjectMapper objectMapper;
-    
+
     private OkHttpClient sseHttpClient;
     private EventSource.Factory eventSourceFactory;
     private ExecutorService executorService;
-    
+
+    // Dedicated executor for HTTP calls triggered by SSE events; prevents blocking the OkHttp callback thread.
+    private ExecutorService cacheUpdateExecutor;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
     private EventSource currentEventSource;
-    private int attempt = 0;
+
+    // A-02: volatile ensures cross-thread visibility; AtomicInteger guarantees atomic read-modify-write.
+    private final AtomicInteger attempt = new AtomicInteger(0);
 
     public FlagSseListener(FlowGuardClientConfig config, FlagCache cache, FlowGuardClient client) {
         this.config = config;
@@ -51,22 +57,29 @@ public class FlagSseListener extends EventSourceListener {
     public synchronized void start() {
         if (running.compareAndSet(false, true)) {
             logger.info("Starting FlowGuard SSE Listener...");
-            attempt = 0;
-            
+            attempt.set(0);
+
             // SSE-dedicated OkHttpClient with infinite read timeout to allow long-lived streams
             this.sseHttpClient = new OkHttpClient.Builder()
                     .connectTimeout(config.getConnectionTimeoutSeconds(), TimeUnit.SECONDS)
                     .readTimeout(0, TimeUnit.MILLISECONDS)
                     .build();
-            
+
             this.eventSourceFactory = EventSources.createFactory(sseHttpClient);
-            
+
             this.executorService = Executors.newSingleThreadExecutor(r -> {
                 Thread thread = new Thread(r, "flowguard-sse-worker");
                 thread.setDaemon(true);
                 return thread;
             });
-            
+
+            // M-02: separate single-threaded executor so HTTP fetches never block the OkHttp callback thread.
+            this.cacheUpdateExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread thread = new Thread(r, "flowguard-cache-updater");
+                thread.setDaemon(true);
+                return thread;
+            });
+
             executorService.submit(this::connectLoop);
         }
     }
@@ -77,13 +90,13 @@ public class FlagSseListener extends EventSourceListener {
     public synchronized void stop() {
         if (running.compareAndSet(true, false)) {
             logger.info("Stopping FlowGuard SSE Listener...");
-            
+
             // Cancel current SSE subscription if active
             if (currentEventSource != null) {
                 currentEventSource.cancel();
                 currentEventSource = null;
             }
-            
+
             if (executorService != null) {
                 executorService.shutdownNow();
                 try {
@@ -96,8 +109,20 @@ public class FlagSseListener extends EventSourceListener {
                 executorService = null;
             }
 
+            if (cacheUpdateExecutor != null) {
+                cacheUpdateExecutor.shutdownNow();
+                try {
+                    if (!cacheUpdateExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                        logger.warn("Cache update thread pool did not terminate gracefully.");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                cacheUpdateExecutor = null;
+            }
+
             if (sseHttpClient != null) {
-                sseHttpClient.dispatcher().executorService().shutdown();
+                sseHttpClient.dispatcher().executorService().shutdownNow();
                 sseHttpClient.connectionPool().evictAll();
                 sseHttpClient = null;
             }
@@ -114,7 +139,7 @@ public class FlagSseListener extends EventSourceListener {
         while (running.get()) {
             try {
                 connectSse();
-                
+
                 // Keep background thread blocked until connection failure occurs or listener stopped
                 synchronized (this) {
                     while (running.get() && currentEventSource != null) {
@@ -129,8 +154,8 @@ public class FlagSseListener extends EventSourceListener {
             }
 
             if (running.get()) {
-                long delaySeconds = calculateBackoff(attempt++);
-                logger.warn("FlowGuard SSE disconnected. Retrying connection in {}s (attempt {})...", delaySeconds, attempt);
+                long delaySeconds = calculateBackoff(attempt.getAndIncrement());
+                logger.warn("FlowGuard SSE disconnected. Retrying connection in {}s (attempt {})...", delaySeconds, attempt.get());
                 try {
                     TimeUnit.SECONDS.sleep(delaySeconds);
                 } catch (InterruptedException e) {
@@ -182,7 +207,7 @@ public class FlagSseListener extends EventSourceListener {
     public void onOpen(EventSource eventSource, Response response) {
         logger.info("Successfully established FlowGuard SSE real-time streaming channel.");
         synchronized (this) {
-            attempt = 0; // Reset backoff attempts on successful handshake
+            attempt.set(0); // Reset backoff attempts on successful handshake
         }
     }
 
@@ -260,31 +285,34 @@ public class FlagSseListener extends EventSourceListener {
 
     /**
      * Parses the payload to insert or update a specific flag in the cache.
+     * M-02: HTTP fetches are offloaded to cacheUpdateExecutor to avoid blocking the OkHttp callback thread.
      */
     private void processUpdated(String data) throws Exception {
         try {
             Map<String, Object> map = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
             if (map.containsKey("flagKey")) {
-                // Event payload is a FlagChangeEvent (slim event). Fetch latest evaluation configurations.
+                // Slim event — fetch full flag from server off the callback thread
                 String flagKey = (String) map.get("flagKey");
-                logger.debug("SSE: flag-updated event received for key '{}' (slim). Hydrating from API...", flagKey);
-                Flag flag = client.fetchSingleFlag(flagKey);
-                if (flag != null) {
-                    cache.put(flag.key(), flag);
-                    logger.info("SSE: Successfully hydrated and updated flag '{}' in cache.", flagKey);
-                } else {
-                    logger.warn("SSE: Failed to hydrate details for single flag '{}'. Reloading complete cache as recovery.", flagKey);
-                    client.loadFlags();
-                }
+                logger.debug("SSE: flag-updated slim event for '{}'. Submitting hydration to cache updater.", flagKey);
+                submitCacheUpdate(() -> {
+                    Flag flag = client.fetchSingleFlag(flagKey);
+                    if (flag != null) {
+                        cache.put(flag.key(), flag);
+                        logger.info("SSE: hydrated and updated flag '{}' in cache.", flag.key());
+                    } else {
+                        logger.warn("SSE: failed to hydrate flag '{}'. Reloading full cache.", flagKey);
+                        client.loadFlags();
+                    }
+                });
             } else if (map.containsKey("key")) {
-                // Event payload is the full Flag object
+                // Full Flag payload — no HTTP needed, apply directly on the callback thread
                 Flag flag = objectMapper.readValue(data, Flag.class);
                 cache.put(flag.key(), flag);
-                logger.info("SSE: Successfully inserted/updated flag '{}' in cache (direct payload).", flag.key());
+                logger.info("SSE: inserted/updated flag '{}' in cache (direct payload).", flag.key());
             }
         } catch (Exception e) {
-            logger.warn("SSE: Error parsing flag-updated payload: {}. Invoking full recovery sync.", e.getMessage());
-            client.loadFlags();
+            logger.warn("SSE: error parsing flag-updated payload: {}. Submitting full recovery sync.", e.getMessage());
+            submitCacheUpdate(client::loadFlags);
         }
     }
 
@@ -332,6 +360,34 @@ public class FlagSseListener extends EventSourceListener {
             logger.warn("SSE: Error processing flag-toggled payload: {}. Invoking full recovery sync.", e.getMessage());
             client.loadFlags();
         }
+    }
+
+    /**
+     * Submits a blocking cache-update task to the dedicated executor.
+     * If the executor is unavailable (e.g. listener not started), executes inline as fallback.
+     */
+    private void submitCacheUpdate(CacheUpdateTask task) {
+        ExecutorService executor = cacheUpdateExecutor;
+        if (executor != null && !executor.isShutdown()) {
+            executor.submit(() -> {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    logger.error("SSE: cache update task failed: {}", e.getMessage(), e);
+                }
+            });
+        } else {
+            try {
+                task.run();
+            } catch (Exception e) {
+                logger.error("SSE: cache update task failed (inline): {}", e.getMessage(), e);
+            }
+        }
+    }
+
+    @FunctionalInterface
+    private interface CacheUpdateTask {
+        void run() throws Exception;
     }
 
     // Exposed for testing

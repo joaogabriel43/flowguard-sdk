@@ -46,10 +46,10 @@ public class FlagCache {
     }
 
     /**
-     * Atomically toggles the enabled field of a flag in the cache.
-     * Uses ConcurrentHashMap's native atomic computeIfPresent for maximum performance.
+     * Toggles the enabled field of a flag. Synchronized on the same monitor as replace()
+     * to prevent a toggle event from being silently discarded during a concurrent snapshot swap.
      */
-    public void toggle(String key) {
+    public synchronized void toggle(String key) {
         if (key == null) {
             return;
         }

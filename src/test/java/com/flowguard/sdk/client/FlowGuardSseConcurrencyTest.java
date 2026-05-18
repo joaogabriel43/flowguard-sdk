@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlowGuardSseConcurrencyTest {
 
@@ -27,17 +28,12 @@ class FlowGuardSseConcurrencyTest {
         FlagCache cache = new FlagCache();
         LocalEvaluator evaluator = new LocalEvaluator();
         FallbackStrategy fallbackStrategy = new FallbackStrategy(false);
-        FlowGuardClient client = null; // not needed for evaluations
-        
-        // Mock SSE Listener to bypass network calls
-        FlagSseListener sseListener = null;
 
-        FlowGuard flowGuard = new FlowGuard(cache, evaluator, fallbackStrategy, client, sseListener);
+        FlowGuard flowGuard = new FlowGuard(cache, evaluator, fallbackStrategy, null, null);
 
         UUID tenantId = UUID.randomUUID();
         String flagKey = "concurrency-flag";
-        
-        // Populate initial flag
+
         Flag flag = new Flag(
                 UUID.randomUUID(),
                 tenantId,
@@ -51,12 +47,14 @@ class FlowGuardSseConcurrencyTest {
 
         int readerCount = 20;
         int operationsPerReader = 1000;
-        
+
         ExecutorService executorService = Executors.newFixedThreadPool(readerCount + 1);
         CountDownLatch startLatch = new CountDownLatch(1);
-        CountDownLatch finishLatch = new CountDownLatch(readerCount + 1);
-        
-        AtomicBoolean running = new AtomicBoolean(true);
+
+        // M-03 fix: latch only for readers — writer is stopped independently after readers finish.
+        CountDownLatch readerFinishLatch = new CountDownLatch(readerCount);
+
+        AtomicBoolean writerRunning = new AtomicBoolean(true);
         AtomicInteger exceptionCount = new AtomicInteger(0);
 
         // 1. Writer Thread: Simulates SseListener processing SSE updates in background
@@ -64,9 +62,9 @@ class FlowGuardSseConcurrencyTest {
             try {
                 startLatch.await();
                 int iteration = 0;
-                while (running.get()) {
+                while (writerRunning.get()) {
                     iteration++;
-                    
+
                     // Alternates between replace, put, toggle, and remove
                     if (iteration % 4 == 0) {
                         Map<String, Flag> newMap = new HashMap<>();
@@ -79,14 +77,11 @@ class FlowGuardSseConcurrencyTest {
                     } else {
                         cache.remove(flagKey);
                     }
-                    
-                    // Minor yield to prevent complete thread starvation of readers
+
                     Thread.yield();
                 }
             } catch (Exception e) {
                 exceptionCount.incrementAndGet();
-            } finally {
-                finishLatch.countDown();
             }
         });
 
@@ -96,29 +91,29 @@ class FlowGuardSseConcurrencyTest {
                 try {
                     startLatch.await();
                     for (int j = 0; j < operationsPerReader; j++) {
-                        // isEnabled evaluates rollout percentages & maps, heavily accessing FlagCache
                         flowGuard.isEnabled(flagKey, "user-" + j);
                     }
                 } catch (Exception e) {
                     exceptionCount.incrementAndGet();
                     e.printStackTrace();
                 } finally {
-                    finishLatch.countDown();
+                    readerFinishLatch.countDown();
                 }
             });
         }
 
         // When: Trigger concurrent operations
         startLatch.countDown();
-        
-        // Wait for readers to finish their operations
-        // Let them run for up to 5 seconds max
-        boolean finished = finishLatch.await(5, TimeUnit.SECONDS);
-        running.set(false); // Stop writer if not stopped
 
+        // M-03 fix: wait only for readers; writer is independent.
+        boolean finished = readerFinishLatch.await(5, TimeUnit.SECONDS);
+
+        // Stop writer after readers are done (or timed out)
+        writerRunning.set(false);
         executorService.shutdownNow();
 
-        // Then: Assert no concurrent modification or race exceptions were raised
+        // Then
+        assertTrue(finished, "All reader threads must complete within the 5-second timeout");
         assertEquals(0, exceptionCount.get(), "No exceptions should be thrown during concurrent cache read/write operations");
     }
 }
