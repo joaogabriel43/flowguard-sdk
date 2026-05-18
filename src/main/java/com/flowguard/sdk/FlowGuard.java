@@ -86,7 +86,12 @@ public class FlowGuard {
      */
     public boolean isEnabled(String flagKey, String userId, Map<String, String> attributes) {
         if (flagKey == null || flagKey.trim().isEmpty()) {
-            logger.debug("Flag key is null or empty, falling back.");
+            logger.warn("Flag key is null or empty, falling back.");
+            return fallbackStrategy.evaluate();
+        }
+
+        if (userId == null) {
+            logger.warn("User ID is null for flag '{}', falling back.", flagKey);
             return fallbackStrategy.evaluate();
         }
 
