@@ -11,6 +11,37 @@
 
     <name>FlowGuard SDK Java</name>
     <description>Java SDK for integration with FlowGuard Feature Flag server</description>
+    <url>https://github.com/joaogabriel43/flowguard-sdk</url>
+
+    <!-- M-04: licenses required for public Maven artifacts -->
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <!-- M-04: developer information for public artifact discovery -->
+    <developers>
+        <developer>
+            <id>joaogabriel43</id>
+            <name>João Gabriel Borba do Nascimento</name>
+            <email>joaogabriel43@github.com</email>
+            <url>https://github.com/joaogabriel43</url>
+            <roles>
+                <role>developer</role>
+            </roles>
+        </developer>
+    </developers>
+
+    <!-- M-04: SCM coordinates for source linking in IDE and Maven Central -->
+    <scm>
+        <connection>scm:git:git://github.com/joaogabriel43/flowguard-sdk.git</connection>
+        <developerConnection>scm:git:ssh://github.com/joaogabriel43/flowguard-sdk.git</developerConnection>
+        <url>https://github.com/joaogabriel43/flowguard-sdk/tree/main</url>
+        <tag>HEAD</tag>
+    </scm>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
@@ -22,7 +53,8 @@
         <spring-boot.version>3.2.3</spring-boot.version>
         <junit-jupiter.version>5.10.2</junit-jupiter.version>
         <mockito.version>5.11.0</mockito.version>
-        <wiremock.version>2.35.1</wiremock.version>
+        <!-- B-03: updated to WireMock 3.x (org.wiremock groupId) for Java 21 compatibility -->
+        <wiremock.version>3.6.0</wiremock.version>
         <jqwik.version>1.8.3</jqwik.version>
     </properties>
 
@@ -78,9 +110,10 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- B-03: org.wiremock:wiremock:3.x replaces com.github.tomakehurst:wiremock-jre8:2.x -->
         <dependency>
-            <groupId>com.github.tomakehurst</groupId>
-            <artifactId>wiremock-jre8</artifactId>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock</artifactId>
             <version>${wiremock.version}</version>
             <scope>test</scope>
         </dependency>
@@ -124,6 +157,40 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.1.2</version>
             </plugin>
+
+            <!-- M-04: publish sources jar so IDE consumers can navigate to SDK source -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.0</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- M-04: publish javadoc jar for IDE and Maven repository consumers -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.6.3</version>
+                <configuration>
+                    <doclint>none</doclint>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>com.github.spotbugs</groupId>
                 <artifactId>spotbugs-maven-plugin</artifactId>

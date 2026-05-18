@@ -38,12 +38,16 @@ public final class MurmurHash3 {
             h1 = h1 * 5 + 0xe6546b64;
         }
 
+        // B-01: fall-through is intentional — MurmurHash3 tail-bytes accumulation.
+        @SuppressWarnings("fallthrough")
         int k1 = 0;
         switch (length & 0x03) {
             case 3:
                 k1 ^= (data[roundedLength + 2] & 0xff) << 16;
+                // falls through
             case 2:
                 k1 ^= (data[roundedLength + 1] & 0xff) << 8;
+                // falls through
             case 1:
                 k1 ^= (data[roundedLength] & 0xff);
                 k1 *= c1;
